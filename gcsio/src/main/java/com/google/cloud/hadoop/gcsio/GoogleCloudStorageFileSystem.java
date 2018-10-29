@@ -51,6 +51,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -78,6 +79,7 @@ public class GoogleCloudStorageFileSystem {
 
   // GCS access instance.
   private GoogleCloudStorage gcs;
+  private final GcsAtomicOperations gcsAtomic;
 
   private final PathCodec pathCodec;
 
@@ -137,6 +139,7 @@ public class GoogleCloudStorageFileSystem {
 
     this.options = options;
     this.gcs = new GoogleCloudStorageImpl(options.getCloudStorageOptions(), credential);
+    this.gcsAtomic = new GcsAtomicOperations(gcs);
     this.pathCodec = options.getPathCodec();
 
     if (options.isPerformanceCacheEnabled()) {
@@ -149,9 +152,11 @@ public class GoogleCloudStorageFileSystem {
    * GoogleCloudStorage {@code gcs}.
    */
   public GoogleCloudStorageFileSystem(GoogleCloudStorage gcs) throws IOException {
-    this(gcs, GoogleCloudStorageFileSystemOptions.newBuilder()
-        .setImmutableCloudStorageOptions(gcs.getOptions())
-        .build());
+    this(
+        gcs,
+        GoogleCloudStorageFileSystemOptions.newBuilder()
+            .setImmutableCloudStorageOptions(gcs.getOptions())
+            .build());
   }
 
   /**
@@ -161,6 +166,7 @@ public class GoogleCloudStorageFileSystem {
   public GoogleCloudStorageFileSystem(
       GoogleCloudStorage gcs, GoogleCloudStorageFileSystemOptions options) throws IOException {
     this.gcs = gcs;
+    this.gcsAtomic = new GcsAtomicOperations(gcs);
     this.options = options;
     this.pathCodec = options.getPathCodec();
   }
@@ -741,7 +747,35 @@ public class GoogleCloudStorageFileSystem {
    */
   private void renameInternal(FileInfo srcInfo, URI dst) throws IOException {
     if (srcInfo.isDirectory()) {
-      renameDirectoryInternal(srcInfo, dst);
+      String clientId = UUID.randomUUID().toString();
+      StorageResourceId srcResourceId = pathCodec.validatePathAndGetId(srcInfo.getPath(), true);
+      StorageResourceId dstResourceId = pathCodec.validatePathAndGetId(dst, true);
+      do {
+        try {
+          if (gcsAtomic.lockPaths(clientId, srcResourceId, dstResourceId)) {
+            break;
+          }
+        } catch (Exception e) {
+          logger.atWarning().withCause(e).log(
+              "Failed to lock (client=%s, src=%s, dst=%s), retrying.",
+              clientId, srcResourceId, dstResourceId);
+        }
+      } while (true);
+      try {
+        renameDirectoryInternal(srcInfo, dst);
+      } finally {
+        do {
+          try {
+            if (gcsAtomic.unlockPaths(clientId, srcResourceId, dstResourceId)) {
+              break;
+            }
+          } catch (Exception e) {
+            logger.atWarning().withCause(e).log(
+                "Failed to unlock (client=%s, src=%s, dst=%s), retrying.",
+                clientId, srcResourceId, dstResourceId);
+          }
+        } while (true);
+      }
     } else {
       URI src = srcInfo.getPath();
       StorageResourceId srcResourceId = pathCodec.validatePathAndGetId(src, true);
