@@ -27,21 +27,17 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 import com.google.api.client.util.ExponentialBackOff;
-import com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadOptions.GenerationReadConsistency;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.flogger.GoogleLogger;
-import com.google.common.io.CharStreams;
 import com.google.gson.Gson;
 import java.io.IOException;
-import java.io.Reader;
-import java.nio.ByteBuffer;
-import java.nio.channels.Channels;
-import java.nio.channels.WritableByteChannel;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.IntStream;
 
@@ -51,11 +47,8 @@ public class GcsAtomicOperations {
 
   private static final Gson GSON = new Gson();
   private static final String LOCK_NAME = "_GCS_CONNECTOR_LOCK";
-  private static final GoogleCloudStorageReadOptions LOCK_READ_OPTIONS =
-      GoogleCloudStorageReadOptions.DEFAULT
-          .toBuilder()
-          .setGenerationReadConsistency(GenerationReadConsistency.STRICT)
-          .build();
+  private static final String LOCK_METADATA_KEY = "lock";
+  private static final int MAX_LOCKS_COUNT = 20;
 
   // lock record mapping
   private static final int CLIENT_ID_INDEX = 0;
@@ -115,29 +108,41 @@ public class GcsAtomicOperations {
     ExponentialBackOff backOff =
         new ExponentialBackOff.Builder()
             .setInitialIntervalMillis(100)
-            .setMultiplier(1.2)
-            .setMaxIntervalMillis(30_000)
+            .setMultiplier(1.1)
+            .setMaxIntervalMillis(5_000)
             .setMaxElapsedTimeMillis(Integer.MAX_VALUE)
             .build();
 
     do {
       StorageResourceId lockId = StorageResourceId.fromObjectName(lockObject);
       GoogleCloudStorageItemInfo lockInfo = gcs.getItemInfo(lockId);
-      lockId = StorageResourceId.fromObjectName(lockObject, lockInfo.getContentGeneration());
-
+      if (!lockInfo.exists()) {
+        gcs.createEmptyObject(lockId, new CreateObjectOptions(false));
+        lockInfo = gcs.getItemInfo(lockId);
+      }
       List<String[]> lockRecords =
-          lockId.getGenerationId() == 0 ? new ArrayList<>() : getLockRecords(lockId);
+          lockInfo.getMetaGeneration() == 0 || lockInfo.getMetadata().get(LOCK_METADATA_KEY) == null
+              ? new ArrayList<>()
+              : getLockRecords(lockInfo);
 
       if (!modificationFn.apply(lockRecords, clientId, objects)) {
         sleepUninterruptibly(backOff.nextBackOffMillis(), MILLISECONDS);
         continue;
       }
 
-      String lockContent = GSON.toJson(lockRecords.toArray(new String[0][0]), String[][].class);
-      ByteBuffer lockContentBytes = ByteBuffer.wrap(lockContent.getBytes(UTF_8));
+      if (lockRecords.size() > MAX_LOCKS_COUNT) {
+        logger.atInfo().atMostEvery(2, SECONDS).log(
+            "Skipping lock entries update in %s file. Retrying later.", lockId);
+        sleepUninterruptibly(backOff.nextBackOffMillis(), MILLISECONDS);
+        continue;
+      }
 
-      try (WritableByteChannel channel = gcs.create(lockId)) {
-        channel.write(lockContentBytes);
+      String lockContent = GSON.toJson(lockRecords.toArray(new String[0][0]), String[][].class);
+      Map<String, byte[]> metadata = new HashMap<>(lockInfo.getMetadata());
+      metadata.put(LOCK_METADATA_KEY, lockContent.getBytes(UTF_8));
+
+      try {
+        ((GoogleCloudStorageImpl) gcs).updateMetadata(lockInfo, metadata);
       } catch (IOException e) {
         // continue after sleep if update failed due to file generation mismatch
         if (e.getMessage().contains("conditionNotMet")) {
@@ -156,11 +161,8 @@ public class GcsAtomicOperations {
     } while (true);
   }
 
-  private List<String[]> getLockRecords(StorageResourceId lockId) throws IOException {
-    String lockContent;
-    try (Reader reader = Channels.newReader(gcs.open(lockId, LOCK_READ_OPTIONS), UTF_8.name())) {
-      lockContent = CharStreams.toString(reader);
-    }
+  private List<String[]> getLockRecords(GoogleCloudStorageItemInfo lockInfo) throws IOException {
+    String lockContent = new String(lockInfo.getMetadata().get(LOCK_METADATA_KEY), UTF_8);
     String[][] jsonArray = GSON.fromJson(lockContent, String[][].class);
     return new ArrayList<>(Arrays.asList(jsonArray));
   }
