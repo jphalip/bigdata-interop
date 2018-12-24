@@ -74,6 +74,11 @@ public class GoogleHadoopFileSystemIntegrationTest
           URI initUri = new URI("gs:/");
           ghfs.initialize(initUri, loadConfig());
 
+          if (GoogleHadoopFileSystemConfiguration.GCS_LAZY_INITIALIZATION_ENABLE.get(
+              ghfs.getConf(), ghfs.getConf()::getBoolean)) {
+            testInstance.getGcsFs();
+          }
+
           HadoopFileSystemTestBase.postCreateInit();
         }
 
@@ -320,10 +325,17 @@ public class GoogleHadoopFileSystemIntegrationTest
     config.set(GoogleHadoopFileSystemConfiguration.AUTH_CLIENT_ID.getKey(), fakeClientId);
     config.set(GoogleHadoopFileSystemConfiguration.GCS_SYSTEM_BUCKET.getKey(), existingBucket);
 
-    IllegalStateException thrown =
-        assertThrows(
-            IllegalStateException.class,
-            () -> new GoogleHadoopFileSystem().initialize(gsUri, config));
+    GoogleHadoopFileSystem ghfs = new GoogleHadoopFileSystem();
+
+    IllegalStateException thrown;
+    if (GoogleHadoopFileSystemConfiguration.GCS_LAZY_INITIALIZATION_ENABLE.get(
+        config, config::getBoolean)) {
+      ghfs.initialize(gsUri, config);
+      thrown = assertThrows(IllegalStateException.class, ghfs::getGcsFs);
+    } else {
+      thrown = assertThrows(IllegalStateException.class, () -> ghfs.initialize(gsUri, config));
+    }
+
     assertThat(thrown).hasMessageThat().contains("No valid credential configuration discovered");
   }
 
@@ -339,7 +351,7 @@ public class GoogleHadoopFileSystemIntegrationTest
     // in the for-loop.
     GoogleHadoopFileSystem myGhfs = (GoogleHadoopFileSystem) ghfs;
 
-    Configuration config = new Configuration();
+    Configuration config = loadConfig();
     config.set(GoogleHadoopFileSystemConfiguration.GCS_SYSTEM_BUCKET.getKey(), sharedBucketName1);
     ghfs.initialize(myGhfs.initUri, config);
 
@@ -390,7 +402,7 @@ public class GoogleHadoopFileSystemIntegrationTest
 
     fs = new GoogleHadoopFileSystem(fakeGcsFs);
     fs.initUri = initUri;
-    fs.configureBuckets(systemBucketName, true);
+    fs.configureBuckets(fakeGcsFs, systemBucketName, true);
 
     // Verify that config settings were set correctly.
     assertThat(fs.getSystemBucketName()).isEqualTo(systemBucketName);
@@ -399,12 +411,49 @@ public class GoogleHadoopFileSystemIntegrationTest
     initUri = (new Path("gs:/foo")).toUri();
     fs = new GoogleHadoopFileSystem(fakeGcsFs);
     fs.initUri = initUri;
-    fs.configureBuckets(systemBucketName, true);
+    fs.configureBuckets(fakeGcsFs, systemBucketName, true);
 
     // Verify that config settings were set correctly.
     assertThat(fs.getSystemBucketName()).isEqualTo(systemBucketName);
     assertThat(fs.initUri).isEqualTo(initUri);
     assertThat(fs.getRootBucketName()).isEqualTo(systemBucketName);
+  }
+
+  /** Validates success path when there is a root bucket but no system bucket is specified. */
+  @Test
+  @Override
+  public void testConfigureBucketsWithRootBucketButNoSystemBucket() throws IOException {
+    String systemBucketName = null;
+    String rootBucketName = ghfsHelper.getUniqueBucketName("configure-root");
+    URI initUri = new Path("gs://" + rootBucketName).toUri();
+    GoogleCloudStorageFileSystem fakeGcsFs =
+        new GoogleCloudStorageFileSystem(new InMemoryGoogleCloudStorage());
+    GoogleHadoopFileSystem fs = new GoogleHadoopFileSystem(fakeGcsFs);
+    fs.initUri = initUri;
+    fs.configureBuckets(fakeGcsFs, systemBucketName, true);
+
+    // Verify that config settings were set correctly.
+    assertThat(fs.getSystemBucketName()).isNull();
+    assertThat(fs.initUri).isEqualTo(initUri);
+  }
+
+  /** Validates that a system bucket is required if no root bucket is specified. */
+  @Test
+  @Override
+  public void testConfigureBucketsWithNeitherRootBucketNorSystemBucket() throws IOException {
+    String systemBucketName = null;
+    URI initUri = new Path("gs://").toUri();
+    final GoogleCloudStorageFileSystem fakeGcsFs =
+        new GoogleCloudStorageFileSystem(new InMemoryGoogleCloudStorage());
+    final GoogleHadoopFileSystem fs = new GoogleHadoopFileSystem(fakeGcsFs);
+    fs.initUri = initUri;
+
+    IllegalArgumentException thrown =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> fs.configureBuckets(fakeGcsFs, systemBucketName, true));
+
+    assertThat(thrown).hasMessageThat().isEqualTo("No bucket specified in GCS URI: gs:/");
   }
 
   @Test
@@ -420,7 +469,7 @@ public class GoogleHadoopFileSystemIntegrationTest
             FileNotFoundException.class,
             () ->
                 new GoogleHadoopFileSystem(fakeGcsFs)
-                    .configureBuckets(systemBucketName, createSystemBuckets));
+                    .configureBuckets(fakeGcsFs, systemBucketName, createSystemBuckets));
     assertThat(thrown)
         .hasMessageThat()
         .contains(GoogleHadoopFileSystemConfiguration.GCS_SYSTEM_BUCKET.getKey());
@@ -438,7 +487,7 @@ public class GoogleHadoopFileSystemIntegrationTest
             IllegalArgumentException.class,
             () ->
                 new GoogleHadoopFileSystem(fakeGcsFs)
-                    .configureBuckets(systemBucketName, createSystemBuckets));
+                    .configureBuckets(fakeGcsFs, systemBucketName, createSystemBuckets));
     assertThat(thrown).hasMessageThat().contains("Invalid bucket name");
   }
 
@@ -454,7 +503,7 @@ public class GoogleHadoopFileSystemIntegrationTest
             IllegalArgumentException.class,
             () ->
                 new GoogleHadoopFileSystem(fakeGcsFs)
-                    .configureBuckets(systemBucketName, createSystemBuckets));
+                    .configureBuckets(fakeGcsFs, systemBucketName, createSystemBuckets));
     assertThat(thrown).hasMessageThat().contains("must contain only 'a-z0-9_.-' characters.");
   }
 

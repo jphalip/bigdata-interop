@@ -12,13 +12,21 @@
      list requests (when directory contains a lot of files) could introduce
      performance penalties when using performance chache.
 
+  4. Add an option to lazily initialize `GoogleHadoopFileSystem` instances:
+
+      fs.gs.lazy.init.enable (default: false)
+
+  5. Add ability to unset `fs.gs.system.bucket` with an empty string value:
+
+      fs.gs.system.bucket=
+
 
 1.9.10 - 2018-11-01
 
   1. Use Hadoop `CredentialProvider` API to retrieve proxy credentials.
 
-  2. Remove 1024 compose components limit from `SYNCABLE_COMPOSITE` output stream
-     type.
+  2. Remove 1024 compose components limit from `SYNCABLE_COMPOSITE` output
+     stream type.
 
 
 1.9.9 - 2018-10-19
