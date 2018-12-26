@@ -55,6 +55,7 @@
             <configuration>
               <excludes>
                 <exclude>**/GoogleHadoopFS.java</exclude>
+                <exclude>**/GCSDtFetcher.java</exclude>
               </excludes>
               <testExcludes>
                 <!-- Exclude hadoop 2 specific tests -->
@@ -90,6 +91,9 @@
           <plugin>
             <artifactId>maven-compiler-plugin</artifactId>
             <configuration>
+              <excludes>
+                <exclude>**/GCSDtFetcher.java</exclude>
+              </excludes>
               <testExcludes>
                 <exclude>**/hcfs/*1Test.java</exclude>
               </testExcludes>
